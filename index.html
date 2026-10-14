@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light">
-<meta name="study-build" content="v3-attention-seven-options-01">
+<meta name="study-build" content="v3-attention7-01">
 <meta name="robots" content="noindex, nofollow">
 <meta name="study-protocol" content="ameline-v3-7pt-no-price">
 <title>Website Browsing Study</title>
@@ -554,7 +554,7 @@ tr.missing td{background:#FBF1F1}
       '<div class="sec"><h2>What you viewed</h2>'+
         '<div class="q"><p class="qt">What purchase-action button was shown on the Bonbon Mini product page?</p>'+radios('rec1',REC1,true)+'</div>'+
         '<div class="q"><p class="qt">In the brand story, why did Améline Roux make the first bag?</p>'+radios('rec2',REC2,true)+'</div></div>'+
-      '<div class="sec"><h2>Please read carefully</h2><div class="q"><p class="qt">To make sure you are paying attention, please select option 6 for this question.</p><p class="small muted" id="att1-options-note">Please choose from the seven numbered options below (1–7).</p>'+
+      '<div class="sec"><h2>Please read carefully</h2><div class="q"><p class="qt">To make sure you are paying attention, please select the number 7 from the seven options below (1–7).</p>'+
         '<div class="single7">'+SCALE.map(function(n){ return '<label class="choice"><input type="radio" name="att1" value="'+n+'"'+(S.answers.att1===n?' checked':'')+'><span>'+n+'</span></label>'; }).join('')+'</div></div></div>'+
       '<div class="sec"><h2>Technical feedback</h2><div class="q"><p class="qt">Did a technical problem interfere with the instructed browsing task?</p>'+radios('tech1',TECH1)+
         '<label class="field" id="t1t"'+(t===3?'':' hidden')+'><span>If another problem occurred, please describe it:</span><textarea id="tech1_text">'+esc(S.answers.tech1_text||'')+'</textarea></label></div></div>';
