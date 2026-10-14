@@ -7,6 +7,7 @@
 <meta name="study-build" content="v3-attention7-01">
 <meta name="robots" content="noindex, nofollow">
 <meta name="study-protocol" content="ameline-v3-7pt-no-price">
+<meta name="save-engine" content="loadfix1">
 <title>Website Browsing Study</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -22,6 +23,7 @@
   var API_URL = 'https://script.google.com/macros/s/AKfycbz1_mCXBqmGCm8maOkuytdi-CxBOtH3TD72H-mXt1MvwqcYya8xfcZ24uXdce_1onSL/exec';                      // 必填：粘贴 Google Apps Script 部署后的 /exec 网址。
   // v3: formal collection is blocked until API_URL is set. ?test=1 may preview without saving.
   var STUDY_PROTOCOL = 'ameline-v3-7pt-no-price';
+  var PERFORMANCE_PATCH = 'loadfix1';
   var PROLIFIC_COMPLETION_URL = 'https://app.prolific.com/submissions/complete?cc=C1OR1UFC';      // e.g. https://app.prolific.com/submissions/complete?cc=XXXXXXX
   var PROLIFIC_COMPLETION_CODE = 'C1OR1UFC';     // shown to the participant if the URL above is empty
 </script>
@@ -201,6 +203,10 @@ tr.missing td{background:#FBF1F1}
   var root = document.getElementById('root');
   var autoTimer = null, autoInFlight = false, autoAgain = false, autoRevision = 0;
   var navigating = false, saveQueue = Promise.resolve(), protocolVerified = false;
+  var syncPromise = null, syncTimer = null, syncRevision = 0;
+  var storageOK = true, syncStopped = false, finishing = false;
+  S.answers = S.answers || {}; S.web = S.web || {};
+  S.syncCounter = Number(S.syncCounter) || 0;
 
   function newClientKey(){
     var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
@@ -218,13 +224,13 @@ tr.missing td{background:#FBF1F1}
 
 
   function load(){ try{ return JSON.parse(sessionStorage.getItem(KEY)); }catch(e){ return null; } }
-  function persist(){ try{ sessionStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
+  function persist(){ try{ sessionStorage.setItem(KEY, JSON.stringify(S)); storageOK=true; return true; }catch(e){ storageOK=false; return false; } }
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function now(){ return Date.now(); }
 
   var banner = document.getElementById('banner');
   if(DEMO){ banner.hidden = false; banner.textContent = 'Demo mode: no backend URL is set, so nothing is saved. Add API_URL before launching.'; }
-  else if(IS_TEST){ banner.hidden = false; banner.textContent = 'Test session: v3 · 7-point agreement · no displayed product price. Saved with is_test = 1; excluded from formal export.'; }
+  else if(IS_TEST){ banner.hidden = false; banner.textContent = 'Test session: loadfix1 · v3 · 7-point agreement · no displayed product price. Saved with is_test = 1; excluded from formal export.'; }
 
   // Demo backend (used only when API_URL is empty) so the flow can be previewed.
   var demoDb = {};
@@ -239,39 +245,55 @@ tr.missing td{background:#FBF1F1}
 
   function sendRequest(payload, tries){
     tries = tries || 0;
-    if(DEMO) return new Promise(function(res){ setTimeout(function(){ res(demoApi(payload)); },150); });
-    var controller = new AbortController();
-    var timer = setTimeout(function(){ controller.abort(); },45000);
-    return fetch(API_URL, { method:'POST', credentials:'omit', redirect:'follow',
-      headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload), signal:controller.signal })
+    if(DEMO) return new Promise(function(res){setTimeout(function(){res(demoApi(payload));},150);});
+    var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},35000);
+    return fetch(API_URL,{method:'POST',credentials:'omit',redirect:'follow',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),signal:controller.signal})
       .then(function(r){
-        if(!r.ok) throw new Error('Server returned HTTP '+r.status);
-        return r.json().catch(function(){ throw new Error('The server did not return JSON. Check the /exec URL and deployment access.'); });
+        if(!r.ok){var e=new Error('Server returned HTTP '+r.status);e.retryable=[429,500,502,503,504].indexOf(r.status)>=0;throw e;}
+        return r.json().catch(function(){var e=new Error('The server did not return JSON.');e.retryable=true;throw e;});
       }).then(function(res){
-        if(!res.ok && res.retry && tries < 2){
-          clearTimeout(timer);
-          return new Promise(function(r){ setTimeout(r,1200*(tries+1)); }).then(function(){ return sendRequest(payload,tries+1); });
+        if(res.protocol_version!==STUDY_PROTOCOL)throw new Error('The study server is using a different version. Please contact the researcher.');
+        if(!res.ok){
+          var e=new Error(res.error||'Save failed');e.retryable=!!res.retry;
+          e.retryAfter=Number(res.retry_after_ms)||0;e.latestSeq=Number(res.latest_seq)||0;
+          if(res.error_code==='STALE_SNAPSHOT')e.stale=true;
+          throw e;
         }
-        if(res.protocol_version !== STUDY_PROTOCOL) throw new Error('The study server is using a different version. Please contact the researcher; do not continue with this page.');
-        if(!res.ok) throw new Error(res.error || 'Save failed');
         return res;
       }).catch(function(err){
-        if(err.name === 'AbortError') throw new Error('The server took too long. Please retry; your local answers are retained.');
+        if(err.name==='AbortError'){var e=new Error('The server took too long. Keep this tab open and retry.');e.retryable=true;throw e;}
+        if(err instanceof TypeError)err.retryable=true;
         throw err;
-      }).finally(function(){ clearTimeout(timer); });
+      }).finally(function(){clearTimeout(timer);});
   }
+  function requestWithRetry(payload,maxAttempts){
+    var attempt=0;
+    function run(){
+      attempt++;
+      return sendRequest(payload).catch(function(e){
+        if(e.stale && e.latestSeq && payload.sync_seq){
+          S.syncCounter=Math.max(S.syncCounter,e.latestSeq)+1;payload.sync_seq=S.syncCounter;persist();e.retryable=true;
+        }
+        if(!e.retryable || attempt>=maxAttempts)throw e;
+        var delay=Math.max(e.retryAfter||0,Math.min(18000,4000*Math.pow(2,attempt-1)))+Math.floor(Math.random()*5000);
+        return new Promise(function(resolve){setTimeout(resolve,delay);}).then(run);
+      });
+    }
+    return run();
+  }
+
   function api(payload){
-    // Serialize saves so ordinary autosaves never overtake Next / final submission.
-    payload = Object.assign({},payload,{client_key:S.clientKey,protocol_version:STUDY_PROTOCOL});
-    // The read-only handshake prevents a v3 page from writing to an old v2 backend.
-    var job = saveQueue.then(function(){
-      if(DEMO || protocolVerified) return sendRequest(payload);
-      return sendRequest({action:'handshake',protocol_version:STUDY_PROTOCOL}).then(function(){
-        protocolVerified = true; return sendRequest(payload);
+    payload=Object.assign({},payload,{client_key:S.clientKey,protocol_version:STUDY_PROTOCOL,client_build:PERFORMANCE_PATCH});
+    var maxAttempts=(payload.action==='start'||payload.action==='finish'||payload.action==='end')?3:1;
+    var job=saveQueue.then(function(){
+      if(DEMO || protocolVerified)return requestWithRetry(payload,maxAttempts);
+      return requestWithRetry({action:'handshake',protocol_version:STUDY_PROTOCOL,client_build:PERFORMANCE_PATCH},2).then(function(res){
+        if(res.performance_patch!==PERFORMANCE_PATCH)throw new Error('The server save-engine update is not active yet. Please contact the researcher; your local progress is retained.');
+        protocolVerified=true;return requestWithRetry(payload,maxAttempts);
       });
     });
-    saveQueue = job.catch(function(){});
-    return job;
+    saveQueue=job.catch(function(){});return job;
   }
 
   /* =====================================================================
@@ -403,7 +425,7 @@ tr.missing td{background:#FBF1F1}
     document.getElementById('help').addEventListener('click', openHelp);
     if(visTimer) clearInterval(visTimer);
     visTimer = setInterval(webVisibleTick, 5000);
-    api({action:'status', response_id:S.rid, case_status:2, browse:{timing_status: w.gap ? 2 : 1}}).catch(function(){});
+    // No extra write at browser entry. Frozen browsing snapshot is uploaded with survey drafts/final.
   }
 
   window.addEventListener('message', function(ev){
@@ -432,7 +454,7 @@ tr.missing td{background:#FBF1F1}
           w.pdpAt = w.transitions || 0;
           var needed = ROUTE_PAGES[S.cond] || [];
           w.bypass = needed.every(function(m){ return (w.seen||[]).indexOf(m) >= 0; }) ? 0 : 1;
-          api({action:'status', response_id:S.rid, browse:{transitions_to_pdp:w.pdpAt, bypass_flag:w.bypass}}).catch(function(){ /* retried in the complete browse snapshot */ });
+          // Included in the frozen browsing snapshot; do not enqueue another spreadsheet write.
         }
         w.onPdp = true;
       } else {
@@ -465,16 +487,18 @@ tr.missing td{background:#FBF1F1}
     saveBrowsing();
   }
   function saveBrowsing(){
-    root.innerHTML = frame('<div class="loading">Saving your browsing record…</div>');
-    api({action:'status',response_id:S.rid,case_status:3,
-      fields:{survey_color_code:S.color},browse:S.pendingBrowse || {}})
-      .then(function(){
-        S.pendingBrowse = null; S.stage = 'q'; S.qpage = 2;
-        S.q2Start = S.q2Start || now(); persist(); route();
-      }).catch(function(err){
-        root.innerHTML = frame('<section class="card"><h2>We could not save your progress</h2><p>Your progress is retained in this browser. Please check your internet connection and try again.</p><div class="actions"><button class="btn" id="retry">Try again</button></div><p class="msg err">'+esc(err.message)+'</p></section>');
-        document.getElementById('retry').onclick = saveBrowsing;
-      });
+    // Compatible recovery for an old tab persisted at stage=browseSaving.
+    // The original color/timing snapshot is preserved; browsing is NOT restarted.
+    if(!S.rid || [1,2,3,4].indexOf(Number(S.color))<0 || !S.pendingBrowse || S.pendingBrowse.task_complete!==1){
+      root.innerHTML=frame('<section class="card"><h2>We could not restore the browsing record</h2><p>Keep this tab open and contact the researcher. Please do not restart the browsing task.</p></section>');return;
+    }
+    S.browseSnapshot=Object.assign({},S.pendingBrowse);
+    S.answers.survey_color_code=Number(S.color);
+    S.stage='q';S.qpage=S.qpage||2;S.q2Start=S.q2Start||now();
+    S.dirtyDraft=true;syncRevision++;persist();renderQ();
+    setMsg(localDraftMessage());
+    // Background uploads are staggered; they never gate entry into the questionnaire.
+    scheduleBackgroundSync();
   }
 
   function openHelp(){
@@ -587,7 +611,7 @@ tr.missing td{background:#FBF1F1}
     wireLinks();
     if(n>=2 && n<=6){
       root.oninput = scheduleAutosave; root.onchange = scheduleAutosave;
-      if(S.dirtyDraft) scheduleAutosave();
+      if(S.dirtyDraft){setMsg(localDraftMessage());scheduleBackgroundSync();}
     } else { root.oninput = null; root.onchange = null; }
     if(document.getElementById('back')) document.getElementById('back').onclick = function(){ saveAndGo(n, n-1); };
     if(document.getElementById('next')) document.getElementById('next').onclick = function(){ saveAndGo(n, n+1); };
@@ -632,38 +656,58 @@ tr.missing td{background:#FBF1F1}
     return {fields:f, browse:b, missing:missing};
   }
 
+  function localDraftMessage(){
+    return storageOK?'Progress is saved in this tab and will sync in the background. You may continue; keep this tab open.':
+      'Progress is held in this page. Browser storage is unavailable; keep this page open until submission succeeds.';
+  }
   function rememberDraft(c){
-    Object.keys(c.fields).forEach(function(k){ S.answers[k] = c.fields[k]; });
-    if(c.browse.tech1_text !== undefined) S.answers.tech1_text = c.browse.tech1_text;
-    S.dirtyDraft = true; persist();
+    Object.keys(c.fields).forEach(function(k){S.answers[k]=c.fields[k];});
+    if(c.browse.tech1_text!==undefined)S.answers.tech1_text=c.browse.tech1_text;
+    S.dirtyDraft=true;syncRevision++;persist();
+  }
+  function snapshotPayload(action){
+    var fields={};Object.keys(S.answers).forEach(function(k){if(k!=='tech1_text')fields[k]=S.answers[k];});
+    var browse=Object.assign({},S.browseSnapshot||S.pendingBrowse||{});
+    browse.questionnaire_elapsed_s=S.q2Start?Math.max(0,(now()-S.q2Start)/1000):null;
+    browse.tech1_text=S.answers.tech1_text||null;
+    S.syncCounter++;persist();
+    var q={action:action,response_id:S.rid,fields:fields,browse:browse,sync_seq:S.syncCounter};
+    if(action==='save')q.case_status=3;
+    return q;
+  }
+  function scheduleBackgroundSync(delay){
+    if(syncTimer || syncPromise || finishing || syncStopped || !S.dirtyDraft || S.stage!=='q')return;
+    if(delay===undefined)delay=60000+Math.floor(Math.random()*30000);
+    // No cloud write on every answer/Next. One coalesced snapshot, no queue of stale drafts.
+    syncTimer=setTimeout(flushAutosave,delay);
   }
   function scheduleAutosave(){
-    if(S.stage !== 'q' || !PAGE_FIELDS[S.qpage] || navigating) return;
-    var c = collect(S.qpage); rememberDraft(c); autoRevision++;
-    setMsg('Changes saved in this browser; syncing…');
-    clearTimeout(autoTimer); autoTimer = setTimeout(flushAutosave,1500);
+    if(S.stage!=='q'||!PAGE_FIELDS[S.qpage]||navigating||finishing)return;
+    rememberDraft(collect(S.qpage));setMsg(localDraftMessage());scheduleBackgroundSync();
   }
   function flushAutosave(){
-    autoTimer = null;
-    if(S.stage !== 'q' || !PAGE_FIELDS[S.qpage] || navigating) return;
-    if(autoInFlight){ autoAgain = true; return; }
-    var c = collect(S.qpage), n = S.qpage, rev = autoRevision;
-    rememberDraft(c); autoInFlight = true; autoAgain = false;
-    api({action:'save',response_id:S.rid,case_status:3,fields:c.fields,browse:c.browse})
-      .then(function(){
-        if(rev === autoRevision && S.stage === 'q' && S.qpage === n && !navigating){
-          S.dirtyDraft = false; persist();
-          setMsg(DEMO ? 'Preview only — not saved to the study database.' : 'Answers saved.','ok');
-        }
-      }).catch(function(){
-        if(S.stage === 'q' && S.qpage === n && !navigating)
-          setMsg('Not yet synced. Keep this tab open and reconnect, or select Next to retry.','err');
-      }).finally(function(){
-        autoInFlight = false;
-        if(autoAgain && !navigating && S.stage === 'q'){ autoAgain = false; clearTimeout(autoTimer); autoTimer = setTimeout(flushAutosave,1500); }
-      });
+    if(syncTimer)clearTimeout(syncTimer);syncTimer=null;
+    if(syncPromise||finishing||syncStopped||!S.dirtyDraft||S.stage!=='q')return;
+    var rev=syncRevision,payload=snapshotPayload('save');
+    syncPromise=api(payload).then(function(){
+      if(rev===syncRevision){S.dirtyDraft=false;S.pendingBrowse=null;persist();
+        if(S.stage==='q'&&!finishing)setMsg(DEMO?'Preview only — not saved to the study database.':'Answers saved.','ok');}
+    }).catch(function(e){
+      if(e.stale && e.latestSeq){S.syncCounter=Math.max(S.syncCounter,e.latestSeq);persist();}
+      if(!e.retryable && !e.stale)syncStopped=true;
+      if(S.stage==='q'&&!finishing)setMsg('Not yet synced. Your draft is still in this tab. You may continue, but keep it open until Finish succeeds.','err');
+    }).finally(function(){
+      syncPromise=null;
+      if(S.dirtyDraft&&!finishing)scheduleBackgroundSync(60000+Math.floor(Math.random()*30000));
+    });
+    return syncPromise;
   }
-  window.addEventListener('online',function(){ if(S.dirtyDraft) scheduleAutosave(); });
+  window.addEventListener('online',function(){if(S.dirtyDraft){syncStopped=false;scheduleBackgroundSync(4000+Math.floor(Math.random()*10000));}});
+  window.addEventListener('beforeunload',function(e){
+    if(S.stage==='q'&&(S.dirtyDraft||finishing)){e.preventDefault();e.returnValue='';}
+  });
+
+
 
   // marks unanswered questions and scrolls to the first one
   function showMissing(list){
@@ -681,38 +725,30 @@ tr.missing td{background:#FBF1F1}
     if(first) first.scrollIntoView({behavior:'smooth', block:'center'});
   }
 
-  function saveAndGo(n, to){
-    if(navigating) return;
-    var c = PAGE_FIELDS[n] ? collect(n) : {fields:{},browse:{},missing:[]};
-    rememberDraft(c);
-    if(to > n && c.missing.length){
-      showMissing(c.missing);
-      setMsg('Please answer all questions on this page before continuing (' + c.missing.length + ' remaining).', 'err');
-      return;
-    }
-    clearTimeout(autoTimer); autoTimer = null; autoAgain = false; navigating = true;
-    busy(true); setMsg('Saving…');
-    api({action:'save', response_id:S.rid, case_status:3, fields:c.fields, browse:c.browse}).then(function(){
-      Object.keys(c.fields).forEach(function(k){ S.answers[k] = c.fields[k]; });
-      if(c.browse.tech1_text !== undefined) S.answers.tech1_text = c.browse.tech1_text;
-      S.dirtyDraft = false; S.qpage = to; persist(); renderQ();
-    }).catch(function(err){
-      navigating = false; busy(false); setMsg('Your answers could not be saved. Please check your connection and select the button again. ('+err.message+')', 'err');
-    });
+  function saveAndGo(n,to){
+    if(navigating||finishing)return;
+    var c=PAGE_FIELDS[n]?collect(n):{fields:{},browse:{},missing:[]};rememberDraft(c);
+    if(to>n && c.missing.length){showMissing(c.missing);setMsg('Please answer all questions on this page before continuing ('+c.missing.length+' remaining).','err');return;}
+    S.qpage=to;persist();renderQ();setMsg(localDraftMessage());scheduleBackgroundSync();
   }
-
   function finish(){
-    if(navigating) return;
-    clearTimeout(autoTimer); autoTimer = null; autoAgain = false; navigating = true;
-    busy(true); setMsg('Submitting your responses…');
-    var qs = S.q2Start ? Math.max(0,(now()-S.q2Start)/1000) : null;
-    var finalFields = {}; Object.keys(S.answers).forEach(function(k){ if(k !== 'tech1_text') finalFields[k] = S.answers[k]; });
-    api({action:'finish', response_id:S.rid, fields:finalFields, browse:{questionnaire_elapsed_s:qs,tech1_text:S.answers.tech1_text||null}}).then(function(){
-      S.stage = 'done'; S.dirtyDraft = false; persist();
-      if(PROLIFIC_COMPLETION_URL && !IS_TEST){ location.href = PROLIFIC_COMPLETION_URL; return; }
+    if(navigating||finishing)return;
+    finishing=true;navigating=true;syncStopped=false;
+    if(syncTimer)clearTimeout(syncTimer);syncTimer=null;
+    clearTimeout(autoTimer);autoTimer=null;
+    busy(true);setMsg('Submitting your responses. Keep this tab open; do not click repeatedly.');
+    // Wait for at most the ONE already-in-flight draft, then send the full final snapshot.
+    // A failed draft does not prevent final submission; final carries every answer and browse record.
+    var pending=syncPromise||Promise.resolve();
+    pending.catch(function(){}).then(function(){return api(snapshotPayload('finish'));}).then(function(){
+      S.stage='done';S.dirtyDraft=false;S.pendingBrowse=null;S.finalSavedAt=now();persist();
+      finishing=false;navigating=false;
+      if(PROLIFIC_COMPLETION_URL&&!IS_TEST){location.href=PROLIFIC_COMPLETION_URL;return;}
       route();
     }).catch(function(err){
-      navigating = false; busy(false); setMsg('Your responses could not be submitted yet. Please check your connection and select Finish again. ('+err.message+')', 'err');
+      if(err.stale&&err.latestSeq)S.syncCounter=Math.max(S.syncCounter,err.latestSeq);
+      finishing=false;navigating=false;S.dirtyDraft=true;persist();busy(false);
+      setMsg('Your final submission is NOT yet confirmed. Keep this tab open. Please wait a short while, then select Finish once to retry, or contact the researcher. ('+err.message+')','err');
     });
   }
 
