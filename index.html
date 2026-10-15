@@ -6,8 +6,9 @@
 <meta name="color-scheme" content="light">
 <meta name="study-build" content="v3-attention7-01">
 <meta name="robots" content="noindex, nofollow">
+<meta name="technical-build" content="loadfix2">
 <meta name="study-protocol" content="ameline-v3-7pt-no-price">
-<meta name="save-engine" content="loadfix1">
+<meta name="save-engine" content="loadfix2">
 <title>Website Browsing Study</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,7 +24,7 @@
   var API_URL = 'https://script.google.com/macros/s/AKfycbz1_mCXBqmGCm8maOkuytdi-CxBOtH3TD72H-mXt1MvwqcYya8xfcZ24uXdce_1onSL/exec';                      // 必填：粘贴 Google Apps Script 部署后的 /exec 网址。
   // v3: formal collection is blocked until API_URL is set. ?test=1 may preview without saving.
   var STUDY_PROTOCOL = 'ameline-v3-7pt-no-price';
-  var PERFORMANCE_PATCH = 'loadfix1';
+  var PERFORMANCE_PATCH = 'loadfix2';
   var PROLIFIC_COMPLETION_URL = 'https://app.prolific.com/submissions/complete?cc=C1OR1UFC';      // e.g. https://app.prolific.com/submissions/complete?cc=XXXXXXX
   var PROLIFIC_COMPLETION_CODE = 'C1OR1UFC';     // shown to the participant if the URL above is empty
 </script>
@@ -212,25 +213,36 @@ tr.missing td{background:#FBF1F1}
     var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
     return Array.from(bytes).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
   }
-  function clientKeyFor(pid){
-    if(S.clientKey && S.pid === pid) return S.clientKey;
-    var k = 'ameline_access_v3_7pt_no_price|' + API_URL + '|' + (IS_TEST?'test':'real') + '|' + pid;
-    var value = null;
-    try { value = localStorage.getItem(k); } catch(e){}
-    if(!value || !/^[a-f0-9]{64}$/.test(value)) value = newClientKey();
-    try { localStorage.setItem(k, value); } catch(e){}
-    return value;
+  function accessKeyName(pid){return 'ameline_access_v3_7pt_no_price|'+API_URL+'|'+(IS_TEST?'test':'real')+'|'+pid;}
+  function candidateKeysFor(pid){
+    var values=[];
+    function add(v){if(typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)&&values.indexOf(v)<0)values.push(v);}
+    if(S.pid===pid)add(S.clientKey);
+    try{add(localStorage.getItem(accessKeyName(pid)));}catch(e){}
+    // Recover only credentials ALREADY held by this origin for the EXACT same PID/mode.
+    // No lookup of another participant and no sending credentials to an unconfigured service.
+    try{for(var i=0;i<sessionStorage.length&&values.length<5;i++){
+      var n=sessionStorage.key(i);
+      if(n.indexOf('ameline_study_v3_7pt_no_price|'+API_URL+'|'+(IS_TEST?'test':'real')+'|')!==0)continue;
+      var state=JSON.parse(sessionStorage.getItem(n)||'null');
+      if(state&&state.pid===pid)add(state.clientKey);
+    }}catch(e){}
+    return values.slice(0,5);
   }
-
-
-  function load(){ try{ return JSON.parse(sessionStorage.getItem(KEY)); }catch(e){ return null; } }
-  function persist(){ try{ sessionStorage.setItem(KEY, JSON.stringify(S)); storageOK=true; return true; }catch(e){ storageOK=false; return false; } }
+  function clientKeyFor(pid){var values=candidateKeysFor(pid),key=values[0]||newClientKey();try{localStorage.setItem(accessKeyName(pid),key);}catch(e){}return key;}
+  function load(){try{return JSON.parse(sessionStorage.getItem(KEY));}catch(e){return null;}}
+  function persist(){
+    // Full answers stay in sessionStorage (not a new persistent answer database).
+    // Keep the existing long-lived, per-PID credential in localStorage even after reload.
+    try{if(S.pid&&/^[a-f0-9]{64}$/.test(S.clientKey||''))localStorage.setItem(accessKeyName(S.pid),S.clientKey);}catch(e){}
+    try{sessionStorage.setItem(KEY,JSON.stringify(S));storageOK=true;return true;}catch(e){storageOK=false;return false;}
+  }
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function now(){ return Date.now(); }
 
   var banner = document.getElementById('banner');
   if(DEMO){ banner.hidden = false; banner.textContent = 'Demo mode: no backend URL is set, so nothing is saved. Add API_URL before launching.'; }
-  else if(IS_TEST){ banner.hidden = false; banner.textContent = 'Test session: loadfix1 · v3 · 7-point agreement · no displayed product price. Saved with is_test = 1; excluded from formal export.'; }
+  else if(IS_TEST){ banner.hidden = false; banner.textContent = 'Test session: loadfix2 · v3 · 7-point agreement · no displayed product price. Saved with is_test = 1; excluded from formal export.'; }
 
   // Demo backend (used only when API_URL is empty) so the flow can be previewed.
   var demoDb = {};
@@ -243,10 +255,9 @@ tr.missing td{background:#FBF1F1}
     demoDb[p.action+'_'+now()] = p; console.log('[demo save]', p); return {ok:true};
   }
 
-  function sendRequest(payload, tries){
-    tries = tries || 0;
+  function sendRequest(payload, timeoutMs){
     if(DEMO) return new Promise(function(res){setTimeout(function(){res(demoApi(payload));},150);});
-    var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},35000);
+    var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},Math.max(1000,timeoutMs||30000));
     return fetch(API_URL,{method:'POST',credentials:'omit',redirect:'follow',
       headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),signal:controller.signal})
       .then(function(r){
@@ -256,7 +267,7 @@ tr.missing td{background:#FBF1F1}
         if(res.protocol_version!==STUDY_PROTOCOL)throw new Error('The study server is using a different version. Please contact the researcher.');
         if(!res.ok){
           var e=new Error(res.error||'Save failed');e.retryable=!!res.retry;
-          e.retryAfter=Number(res.retry_after_ms)||0;e.latestSeq=Number(res.latest_seq)||0;
+          e.retryAfter=Number(res.retry_after_ms)||0;e.latestSeq=Number(res.latest_seq)||0;e.code=res.error_code||'';
           if(res.error_code==='STALE_SNAPSHOT')e.stale=true;
           throw e;
         }
@@ -268,31 +279,29 @@ tr.missing td{background:#FBF1F1}
       }).finally(function(){clearTimeout(timer);});
   }
   function requestWithRetry(payload,maxAttempts){
-    var attempt=0;
+    var attempt=0,isEntry=payload.action==='start'||payload.action==='recover';
+    var deadline=now()+(isEntry?45000:(payload.action==='finish'?90000:35000));
     function run(){
+      var left=deadline-now();
+      if(left<1000){var e=new Error('The server is busy. Keep this same tab open and retry once shortly, or contact the researcher.');e.retryable=true;return Promise.reject(e);}
       attempt++;
-      return sendRequest(payload).catch(function(e){
-        if(e.stale && e.latestSeq && payload.sync_seq){
-          S.syncCounter=Math.max(S.syncCounter,e.latestSeq)+1;payload.sync_seq=S.syncCounter;persist();e.retryable=true;
-        }
-        if(!e.retryable || attempt>=maxAttempts)throw e;
-        var delay=Math.max(e.retryAfter||0,Math.min(18000,4000*Math.pow(2,attempt-1)))+Math.floor(Math.random()*5000);
+      return sendRequest(payload,Math.min(isEntry?20000:30000,left)).catch(function(e){
+        // Do not promote an old snapshot over a newer tab's answers.
+        if(e.stale&&e.latestSeq){S.syncCounter=Math.max(S.syncCounter,e.latestSeq);persist();}
+        if(!e.retryable||attempt>=maxAttempts)throw e;
+        var delay=Math.max(e.retryAfter||0,2000*Math.pow(2,attempt-1))+Math.floor(Math.random()*3000);
+        if(now()+delay+1000>=deadline)throw e;
         return new Promise(function(resolve){setTimeout(resolve,delay);}).then(run);
       });
     }
     return run();
   }
-
   function api(payload){
     payload=Object.assign({},payload,{client_key:S.clientKey,protocol_version:STUDY_PROTOCOL,client_build:PERFORMANCE_PATCH});
-    var maxAttempts=(payload.action==='start'||payload.action==='finish'||payload.action==='end')?3:1;
-    var job=saveQueue.then(function(){
-      if(DEMO || protocolVerified)return requestWithRetry(payload,maxAttempts);
-      return requestWithRetry({action:'handshake',protocol_version:STUDY_PROTOCOL,client_build:PERFORMANCE_PATCH},2).then(function(res){
-        if(res.performance_patch!==PERFORMANCE_PATCH)throw new Error('The server save-engine update is not active yet. Please contact the researcher; your local progress is retained.');
-        protocolVerified=true;return requestWithRetry(payload,maxAttempts);
-      });
-    });
+    var maxAttempts=(payload.action==='start'||payload.action==='recover'||payload.action==='finish'||payload.action==='end')?3:1;
+    // One initial request instead of handshake -> start. The backend still validates
+    // readiness/protocol BEFORE writing; sendRequest checks the response protocol.
+    var job=saveQueue.then(function(){return requestWithRetry(payload,maxAttempts);});
     saveQueue=job.catch(function(){});return job;
   }
 
@@ -355,6 +364,8 @@ tr.missing td{background:#FBF1F1}
           '</div>'+
         '</div>'+
         '<div class="actions"><button class="btn right" id="go" disabled>Start browsing</button></div>'+
+        '<p class="small muted"><button type="button" class="btn ghost" id="showRecovery">Enter a researcher recovery code</button></p>'+
+        '<div class="notice" id="recoveryBox" hidden><p>Use this only when the researcher sends you a private recovery code through Prolific. It is not a completion code. Keep using one tab.</p><label class="field"><span>Private recovery code</span><input type="text" id="recoveryCode" autocomplete="off" spellcheck="false"></label><div class="actions"><button type="button" class="btn" id="recoverGo">Restore saved session</button></div></div>'+
         '<p class="msg" id="msg" role="status"></p>'+
       '</section>', 'Page 1 of 7');
 
@@ -369,30 +380,73 @@ tr.missing td{background:#FBF1F1}
     }
     root.addEventListener('change', sync);
     document.getElementById('pid').addEventListener('input', sync);
-    go.addEventListener('click', function(){
-      var c = readRadio('consent');
-      var pidVal = document.getElementById('pid').value.trim();
-      if(c===1 && !pidVal && IS_TEST) pidVal = 'TEST-' + now().toString(36).toUpperCase() + Math.floor(Math.random()*1000);
-      S.clientKey = clientKeyFor(c===1 ? pidVal : 'NO_CONSENT');
-      S.pid = c===1 ? pidVal : ''; persist(); // Persist BEFORE sending: a retry keeps its identity.
-      busy(true); setMsg('Please wait…');
-      var payload = {action:'start', consent:c, prolific_pid: c===1 ? pidVal : '', is_test: IS_TEST?1:0};
-      if(IS_TEST && (FORCE==='A'||FORCE==='B')) payload.force_condition = FORCE==='A'?0:1;
+    var opening=false,entryTimer=null;
+    var pidInput=document.getElementById('pid');
+    if(URL_PID){pidInput.readOnly=true;pidInput.title='Participant ID supplied by Prolific.';}
+    document.getElementById('showRecovery').onclick=function(){document.getElementById('recoveryBox').hidden=false;};
+    function startMessage(started){
+      var elapsed=Math.floor((now()-started)/1000);
+      setMsg(elapsed<8?'Opening your study session…':
+        'The server is responding slowly ('+elapsed+' seconds). Your participant ID is unchanged. Please do not click repeatedly or open another tab.');
+    }
+    function acceptEntry(res,pidVal){
+      var priorRid=S.rid,priorStage=S.stage,same=priorRid===res.response_id;
+      if(priorRid&&!same){S.answers={};S.web={};S.color=null;S.browseSnapshot=null;S.pendingBrowse=null;S.q2Start=null;S.qElapsedBase=0;}
+      S.rid=res.response_id;S.cond=res.condition;S.pid=pidVal;
+      if(res.accepted_client_key&&/^[a-f0-9]{64}$/.test(res.accepted_client_key))S.clientKey=res.accepted_client_key;
+      S.syncCounter=Math.max(Number(S.syncCounter)||0,Number(res.latest_seq)||0);
+      Object.keys(res.saved||{}).forEach(function(k){if(res.recovered||!(k in S.answers))S.answers[k]=res.saved[k];});
+      if(res.saved&&res.saved.survey_color_code)S.color=Number(res.saved.survey_color_code);
+      var cs=Number(res.case_status),sb=res.saved_browse||{};
+      if(cs===4){S.stage='done';S.dirtyDraft=false;persist();route();return;}
+      if(cs===5||cs===6){S.stage='ended';persist();route();return;}
+      if(sb.task_complete===1&&[1,2,3,4].indexOf(Number(S.color))>=0){
+        S.browseSnapshot=Object.assign({},sb);S.pendingBrowse=null;
+        if(!same||!S.q2Start){S.qElapsedBase=Number(sb.questionnaire_elapsed_s)||0;S.q2Start=now();}
+        S.web=S.web||{};S.web.resumed=true;
+        S.stage='q';S.qpage=res.recovered?2:(S.qpage||2);S.recoveryReceipt=res.recovery_receipt||null;
+        persist();route();return;
+      }
+      if(same&&S.pendingBrowse&&S.pendingBrowse.task_complete===1&&[1,2,3,4].indexOf(Number(S.color))>=0){S.stage='browseSaving';persist();route();return;}
+      if(!res.resumed||res.allow_reentry||(res.same_entry_request&&!S.web.loadedOnce&&!S.browseSnapshot&&!S.pendingBrowse)){
+        S.stage='browse';S.web=S.web||{};if(res.allow_reentry){S.web.resumed=true;S.web.gap=true;S.recoveryReceipt=res.recovery_receipt;}
+        persist();route();return;
+      }
+      // The server cannot infer whether an old unsaved browsing task was completed.
+      // Do not show stimuli again and silently record a second first exposure.
+      S.stage='consent';persist();renderConsent();document.getElementById('recoveryBox').hidden=false;
+      setMsg('Your saved session was found, but a completed browsing record was not available. Return to the original tab. If that is not possible, contact the researcher through Prolific; do not restart the browsing task.','err');
+    }
+    function beginEntry(action){
+      if(opening)return;
+      var c=readRadio('consent'),pidVal=pidInput.value.trim();
+      if(c===null){setMsg('Please select your consent choice.','err');return;}
+      if(action==='recover'&&c!==1){setMsg('Please confirm consent before restoring your session.','err');return;}
+      if(c===1&&!pidVal&&IS_TEST){pidVal='TEST-'+now().toString(36).toUpperCase()+Math.floor(Math.random()*1000);pidInput.value=pidVal;}
+      if(c===1&&!pidVal){setMsg('Please enter the participant ID supplied by Prolific.','err');return;}
+      var code=action==='recover'?document.getElementById('recoveryCode').value.trim():'';
+      if(action==='recover'&&!code){setMsg('Enter the private recovery code sent by the researcher.','err');return;}
+      var candidates=candidateKeysFor(c===1?pidVal:'NO_CONSENT');
+      S.clientKey=clientKeyFor(c===1?pidVal:'NO_CONSENT');S.pid=c===1?pidVal:'';persist();
+      var payload={action:action,consent:c,prolific_pid:c===1?pidVal:'',is_test:IS_TEST?1:0,candidate_keys:candidates};
+      if(action==='start'&&c===1){if(!S.startNonce)S.startNonce=newClientKey();payload.start_nonce=S.startNonce;persist();}
+      if(code)payload.recovery_code=code;
+      if(IS_TEST&&(FORCE==='A'||FORCE==='B'))payload.force_condition=FORCE==='A'?0:1;
+      opening=true;busy(true);var began=now();startMessage(began);entryTimer=setInterval(function(){startMessage(began);},1000);
       api(payload).then(function(res){
-        if(!res.consented && c===0){ S.stage='noconsent'; S.rid = res.response_id; persist(); return route(); }
-        S.rid = res.response_id; S.cond = res.condition; S.pid = pidVal;
-        Object.keys(res.saved||{}).forEach(function(k){ if(!(k in S.answers)) S.answers[k] = res.saved[k]; });
-        if(res.saved && res.saved.survey_color_code) S.color = res.saved.survey_color_code;
-        var cs = res.case_status;
-        if(cs === 4) S.stage = 'done';
-        else if(cs === 5 || cs === 6) S.stage = 'ended';
-        else if(cs === 3 && S.color){ S.stage = 'q'; S.qpage = S.qpage || 2; S.web.resumed = true; }
-        else { S.stage = 'browse'; if(res.resumed) S.web.resumed = true; }
-        persist(); route();
+        clearInterval(entryTimer);entryTimer=null;
+        if(!res.consented&&c===0){S.stage='noconsent';S.rid=res.response_id;persist();route();return;}
+        acceptEntry(res,pidVal);
       }).catch(function(err){
-        busy(false); sync(); setMsg('We could not reach the study server. Please check your connection and try again. ('+err.message+')', 'err');
-      });
-    });
+        clearInterval(entryTimer);entryTimer=null;busy(false);sync();
+        if(err.code==='SESSION_EXISTS'||err.code==='SESSION_REBOUND'||/already has a session|transferred/i.test(err.message)){
+          document.getElementById('recoveryBox').hidden=false;
+          setMsg('A saved session already exists for this participant ID. This is not a network error. Use the original tab/site/browser, or request a private recovery code through Prolific. Do not change your participant ID.','err');
+        }else{setMsg(err.retryable?'The server is busy and opening is NOT yet confirmed. Keep this same tab. Wait briefly and select Start browsing once to retry, or contact the researcher.':err.message,'err');}
+      }).finally(function(){opening=false;if(entryTimer){clearInterval(entryTimer);entryTimer=null;}});
+    }
+    go.addEventListener('click',function(){beginEntry('start');});
+    document.getElementById('recoverGo').onclick=function(){beginEntry('recover');};
   }
 
   function renderNoConsent(){
@@ -668,7 +722,7 @@ tr.missing td{background:#FBF1F1}
   function snapshotPayload(action){
     var fields={};Object.keys(S.answers).forEach(function(k){if(k!=='tech1_text')fields[k]=S.answers[k];});
     var browse=Object.assign({},S.browseSnapshot||S.pendingBrowse||{});
-    browse.questionnaire_elapsed_s=S.q2Start?Math.max(0,(now()-S.q2Start)/1000):null;
+    browse.questionnaire_elapsed_s=S.q2Start?(Number(S.qElapsedBase)||0)+Math.max(0,(now()-S.q2Start)/1000):null;
     browse.tech1_text=S.answers.tech1_text||null;
     S.syncCounter++;persist();
     var q={action:action,response_id:S.rid,fields:fields,browse:browse,sync_seq:S.syncCounter};
